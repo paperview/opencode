@@ -469,7 +469,7 @@ const layer = Layer.effect(
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
         s.defs[name] = listed
-        publishToRuntime(name, client, listed, timeout)
+        publishToRuntime(name, client, listed, timeout, ownerOf(s, name))
         await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
     }
@@ -567,6 +567,10 @@ const layer = Layer.effect(
       delete s.clients[name]
       delete s.defs[name]
       delete s.instructions[name]
+      // The client is detached before close(), so its onclose guard bails and
+      // never cleans the runtime bridge. Do it here, or the core registry keeps
+      // serving tools bound to a closed client ("Not connected").
+      McpTool.Runtime.remove(name)
       if (!client) return Effect.void
       return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
     }
@@ -589,17 +593,24 @@ const layer = Layer.effect(
       // Bridge into the core-side McpTool.Runtime registry so the v2
       // SessionRunner (which reads from @opencode/v2/MCP, not
       // @opencode/MCP) sees these tools on its next reconcile.
-      publishToRuntime(name, client, listed, timeout)
+      publishToRuntime(name, client, listed, timeout, ownerOf(s, name))
       watch(s, name, client, bridge, timeout)
       if (previous) yield* Effect.tryPromise(() => previous.close()).pipe(Effect.ignore)
       return s.status[name]
     })
+
+    // Session a runtime-added server is bound to (config `session`), if any.
+    const ownerOf = (s: State, name: string): string | undefined => {
+      const config = s.config[name] as { readonly session?: string } | undefined
+      return config?.session
+    }
 
     const publishToRuntime = (
       server: string,
       client: MCPClient,
       listed: MCPToolDef[],
       timeout?: number,
+      owner?: string,
     ) => {
       McpTool.Runtime.set(
         server,
@@ -630,6 +641,7 @@ const layer = Layer.effect(
             }
           },
         })),
+        owner,
       )
     }
 
@@ -698,8 +710,16 @@ const layer = Layer.effect(
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
       yield* requireMcpConfig(name)
       const s = yield* InstanceState.get(state)
+      const owner = ownerOf(s, name)
       yield* closeClient(s, name)
       delete s.clients[name]
+      if (owner !== undefined) {
+        // A session-bound server lives for one turn and is never reconnected, so
+        // drop its config too instead of letting per-turn entries pile up.
+        delete s.config[name]
+        delete s.status[name]
+        return
+      }
       s.status[name] = { status: "disabled" }
     })
 

@@ -39,7 +39,14 @@ export interface Progress {
 }
 
 export interface Interface {
-  readonly materialize: (permissions?: PermissionV2.Ruleset) => Effect.Effect<Materialization>
+  /**
+   * Tools visible to one model request. `scope.sessionID` hides tools registered
+   * with an `owner` belonging to a different session.
+   */
+  readonly materialize: (
+    permissions?: PermissionV2.Ruleset,
+    scope?: { readonly sessionID?: string },
+  ) => Effect.Effect<Materialization>
   /** Internal registration capability exposed publicly only through Tools.Service. */
   readonly register: (
     tools: Readonly<Record<string, AnyTool>>,
@@ -105,6 +112,7 @@ const registryLayer = Layer.effect(
       readonly name: string
       readonly namespace?: string
       readonly codemode: boolean
+      readonly owner?: string
     }
     const local = new Map<string, Array<{ readonly token: object; readonly registration: Registration }>>()
 
@@ -216,6 +224,7 @@ const registryLayer = Layer.effect(
                     name: entry.name,
                     namespace: entry.namespace,
                     codemode,
+                    owner: options?.owner,
                   },
                 },
               ])
@@ -232,12 +241,17 @@ const registryLayer = Layer.effect(
           }),
         )
       }),
-      materialize: Effect.fn("ToolRegistry.materialize")(function* (permissions) {
+      materialize: Effect.fn("ToolRegistry.materialize")(function* (permissions, scope) {
         const direct = new Map<string, Registration>()
         const codemode = new Map<string, Registration>()
         const rules = permissions ?? []
         for (const [name, entries] of local) {
-          const registration = entries.at(-1)?.registration
+          // Newest registration this session may see. Session-owned tools (runtime
+          // MCP servers bound to one chat turn) never leak into another session's
+          // request, and two sessions can own the same tool name side by side.
+          const registration = entries.findLast(
+            ({ registration }) => registration.owner === undefined || registration.owner === scope?.sessionID,
+          )?.registration
           if (!registration) continue
           if (whollyDisabled(permission(registration.tool, name), rules)) continue
           if (registration.codemode) codemode.set(name, registration)

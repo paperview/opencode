@@ -95,6 +95,26 @@ describe("ToolRegistry", () => {
     }),
   )
 
+  it.effect("scopes session-owned registrations to their session", () =>
+    Effect.gen(function* () {
+      const service = yield* ToolRegistry.Service
+      yield* service.register({ shared: make() }, { codemode: false })
+      yield* service.register({ kb_search: make(), mine: make() }, { codemode: false, owner: "ses_a" })
+      yield* service.register({ kb_search: make() }, { codemode: false, owner: "ses_b" })
+      const names = (sessionID?: string) =>
+        service
+          .materialize(undefined, { sessionID })
+          .pipe(Effect.map((m) => m.definitions.map((tool) => tool.name).sort()))
+
+      // Each session sees its own tools plus unowned ones, even when names collide.
+      expect(yield* names("ses_a")).toEqual(["kb_search", "mine", "shared"])
+      expect(yield* names("ses_b")).toEqual(["kb_search", "shared"])
+      // Another session, or no session at all, sees none of the owned tools.
+      expect(yield* names("ses_c")).toEqual(["shared"])
+      expect(yield* names()).toEqual(["shared"])
+    }),
+  )
+
   it.effect("filters disabled tools with edit aliases and ordered wildcard precedence", () =>
     Effect.gen(function* () {
       const service = yield* ToolRegistry.Service

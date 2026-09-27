@@ -52,7 +52,7 @@ const layer = Layer.effect(
       const model = resolved.model
       const providerMetadataKey = model.route.providerMetadataKey ?? model.provider
       const stepLimitReached = agent.info.steps !== undefined && input.step >= agent.info.steps
-      const executableTools = stepLimitReached ? undefined : yield* registry.materialize(agent.info.permissions)
+      const executableTools = stepLimitReached ? undefined : yield* registry.materialize(agent.info.permissions, { sessionID: session.id })
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
       const system = [agent.info.system ? agent.info.system : PROMPT_DEFAULT, input.context.initial]
         .filter((part) => part.length > 0)

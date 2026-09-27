@@ -26,9 +26,14 @@ export const name = (server: string, tool: string) =>
  * This shared in-process registry lets the runtime side inject tools
  * that the core reconciler below will pick up on the next fire.
  *
- * The opencode-side MCP publishes McpEvent.ToolsChanged after a runtime
- * add succeeds; that event triggers the reconcile which reads both
- * MCP.Service.tools() and Runtime.list().
+ * Every set/remove notifies subscribers directly, and the reconciler below
+ * subscribes, so a runtime add or disconnect re-registers tools at once. (The
+ * two sides don't share an event bus, so McpEvent.ToolsChanged alone never
+ * reached this reconciler and it kept serving a stale snapshot whose clients
+ * had closed: "Not connected".)
+ *
+ * An entry may name an owning session. Its tools are then registered natively
+ * (not behind CodeMode's `execute`) and only that session's requests see them.
  */
 export interface RuntimeToolEntry {
   readonly name: string
@@ -45,17 +50,33 @@ export interface RuntimeToolEntry {
   }>
 }
 
-const runtimeServers = new Map<string, ReadonlyArray<RuntimeToolEntry>>()
+export interface RuntimeServer {
+  readonly tools: ReadonlyArray<RuntimeToolEntry>
+  readonly owner?: string
+}
+
+const runtimeServers = new Map<string, RuntimeServer>()
+const runtimeListeners = new Set<() => void>()
+
+const notifyRuntime = () => {
+  for (const listener of runtimeListeners) listener()
+}
 
 export const Runtime = {
-  set(server: string, tools: ReadonlyArray<RuntimeToolEntry>): void {
-    runtimeServers.set(server, tools)
+  set(server: string, tools: ReadonlyArray<RuntimeToolEntry>, owner?: string): void {
+    runtimeServers.set(server, { tools, owner })
+    notifyRuntime()
   },
   remove(server: string): void {
-    runtimeServers.delete(server)
+    if (runtimeServers.delete(server)) notifyRuntime()
   },
-  list(): ReadonlyMap<string, ReadonlyArray<RuntimeToolEntry>> {
+  list(): ReadonlyMap<string, RuntimeServer> {
     return runtimeServers
+  },
+  /** Called after every set/remove. Returns an unsubscribe function. */
+  subscribe(listener: () => void): () => void {
+    runtimeListeners.add(listener)
+    return () => runtimeListeners.delete(listener)
   },
 }
 
@@ -66,6 +87,7 @@ export const layer = Layer.effectDiscard(
     const events = yield* EventV2.Service
     const permission = yield* PermissionV2.Service
     const scope = yield* Scope.Scope
+    const runFork = Effect.runForkWith(yield* Effect.context())
     const lock = Semaphore.makeUnsafe(1)
     let current: Scope.Closeable | undefined
 
@@ -74,6 +96,9 @@ export const layer = Layer.effectDiscard(
     const reconcile = lock.withPermit(
       Effect.gen(function* () {
         const groups = new Map<string, Record<string, Tool.AnyTool>>()
+        // Runtime servers register natively and may be session-owned; config
+        // servers keep the CodeMode default.
+        const runtimeOptions = new Map<string, { codemode: false; owner?: string }>()
         for (const tool of yield* mcp.tools()) {
           const group = groups.get(tool.server) ?? {}
           const schema = (tool.inputSchema ?? {}) as JsonSchema.JsonSchema
@@ -148,8 +173,9 @@ export const layer = Layer.effectDiscard(
 
         // Also register runtime-bridge tools published by the opencode-side
         // MCP service (see Runtime block above). Same shape, different source.
-        for (const [server, entries] of Runtime.list()) {
+        for (const [server, { tools: entries, owner }] of Runtime.list()) {
           const group = groups.get(server) ?? {}
+          runtimeOptions.set(server, { codemode: false, owner })
           for (const tool of entries) {
             const schema = (tool.inputSchema ?? {}) as JsonSchema.JsonSchema
             group[tool.name] = Tool.withPermission(
@@ -217,7 +243,14 @@ export const layer = Layer.effectDiscard(
         const next = yield* Scope.fork(scope)
         yield* Effect.forEach(
           groups,
-          ([server, record]) => tools.register(record, { namespace: namespace(server) }),
+          ([server, record]) => {
+            const runtime = runtimeOptions.get(server)
+            // A session-owned server's tools keep their plain names (kb_search, not
+            // <server>_kb_search): ownership already rules out collisions, and the
+            // model sees the same names it would on any other provider.
+            if (runtime?.owner !== undefined) return tools.register(record, runtime)
+            return tools.register(record, { namespace: namespace(server), ...runtime })
+          },
           {
             discard: true,
           },
@@ -228,6 +261,10 @@ export const layer = Layer.effectDiscard(
     )
 
     yield* reconcile.pipe(Effect.forkScoped)
+    const unsubscribe = Runtime.subscribe(() => {
+      runFork(reconcile)
+    })
+    yield* Effect.addFinalizer(() => Effect.sync(unsubscribe))
     yield* events.subscribe(McpEvent.ToolsChanged).pipe(
       Stream.runForEach(() => reconcile),
       Effect.forkScoped({ startImmediately: true }),

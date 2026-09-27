@@ -17,6 +17,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Effect, Exit } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { MCP } from "../../src/mcp/index"
+import { McpTool } from "@opencode-ai/core/tool/mcp"
 import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
 import { TestInstance } from "../fixture/fixture"
 import { pollWithTimeout, testEffect } from "../lib/effect"
@@ -324,6 +325,44 @@ it.instance("disconnect removes protocol data and reconnect establishes a new se
     yield* mcp.connect("reconnect-server")
     expect((yield* mcp.status())["reconnect-server"]?.status).toBe("connected")
     expect(Object.keys(yield* mcp.tools())).toEqual(["reconnect-server_test_tool"])
+  }),
+)
+
+it.instance("session-bound runtime server is owned while connected and fully removed on disconnect", () =>
+  Effect.gen(function* () {
+    const server = yield* lifecycleServer()
+    const mcp = yield* MCP.Service
+    const changes: number[] = []
+    const unsubscribe = McpTool.Runtime.subscribe(() => changes.push(McpTool.Runtime.list().size))
+
+    yield* mcp.add("turn-a", { ...remote(server.url), session: "ses_turn_a" })
+    const entry = McpTool.Runtime.list().get("turn-a")
+    expect(entry?.owner).toBe("ses_turn_a")
+    expect(entry?.tools.map((tool) => tool.name)).toEqual(["test_tool"])
+    expect(changes.length).toBeGreaterThan(0)
+
+    const before = changes.length
+    yield* mcp.disconnect("turn-a")
+    unsubscribe()
+    // The bridge entry goes with the client (it used to linger, bound to a
+    // closed client: "Not connected"), subscribers hear about it, and the
+    // per-turn config entry doesn't pile up in status().
+    expect(McpTool.Runtime.list().has("turn-a")).toBe(false)
+    expect(changes.length).toBeGreaterThan(before)
+    expect((yield* mcp.status())["turn-a"]).toBeUndefined()
+  }),
+)
+
+it.instance("disconnecting an unbound runtime server removes its bridge entry but keeps its config", () =>
+  Effect.gen(function* () {
+    const server = yield* lifecycleServer()
+    const mcp = yield* MCP.Service
+    yield* mcp.add("shared", remote(server.url))
+    expect(McpTool.Runtime.list().get("shared")?.owner).toBeUndefined()
+
+    yield* mcp.disconnect("shared")
+    expect(McpTool.Runtime.list().has("shared")).toBe(false)
+    expect((yield* mcp.status())["shared"]?.status).toBe("disabled")
   }),
 )
 

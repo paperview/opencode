@@ -756,6 +756,50 @@ test("serializes concurrent MCP lifecycle operations", async () => {
   )
 })
 
+it.effect("runtime servers reconcile on change, natively and only for their owning session", () =>
+  Effect.gen(function* () {
+    const registry = yield* ToolRegistry.Service
+    const names = (sessionID?: string) =>
+      registry
+        .materialize(undefined, { sessionID })
+        .pipe(Effect.map((m) => m.definitions.map((tool) => tool.name).sort()))
+    const until = (sessionID: string, predicate: (names: string[]) => boolean) =>
+      Effect.gen(function* () {
+        for (let i = 0; i < 1000; i++) {
+          const current = yield* names(sessionID)
+          if (predicate(current)) return current
+          yield* Effect.promise(() => Bun.sleep(1))
+        }
+        return yield* Effect.fail(new Error(`runtime tools never settled for ${sessionID}`))
+      })
+    const entry = (name: string): McpTool.RuntimeToolEntry => ({
+      name,
+      inputSchema: { type: "object", properties: {} },
+      execute: async () => ({ isError: false, content: [{ type: "text", text: name }] }),
+    })
+
+    McpTool.Runtime.set("bot7turn", [entry("kb_search")], "ses_seven")
+    McpTool.Runtime.set("bot13turn", [entry("kb_search"), entry("update_field")], "ses_thirteen")
+    try {
+      // Plain native names (no Code Mode wrapper, no server prefix), per session.
+      expect(yield* until("ses_seven", (n) => n.includes("kb_search"))).toEqual(["execute", "kb_search"])
+      expect(yield* until("ses_thirteen", (n) => n.includes("update_field"))).toEqual([
+        "execute",
+        "kb_search",
+        "update_field",
+      ])
+      expect(yield* names("ses_other")).toEqual(["execute"])
+
+      // Removing a server takes its tools away without any MCP event.
+      McpTool.Runtime.remove("bot7turn")
+      expect(yield* until("ses_seven", (n) => !n.includes("kb_search"))).toEqual(["execute"])
+    } finally {
+      McpTool.Runtime.remove("bot7turn")
+      McpTool.Runtime.remove("bot13turn")
+    }
+  }),
+)
+
 it.effect("advertises MCP output schemas to Code Mode", () =>
   Effect.gen(function* () {
     const registry = yield* ToolRegistry.Service

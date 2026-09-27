@@ -56,6 +56,10 @@ export const Remote = Schema.Struct({
   timeout: Schema.optional(PositiveInt).annotate({
     description: "Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified.",
   }),
+  session: Schema.optional(Schema.String).annotate({
+    description:
+      "Bind a runtime-added server to one session: its tools are exposed natively to that session only, and disconnecting it removes it.",
+  }),
 }).annotate({ identifier: "McpRemoteConfig" })
 export type Remote = Schema.Schema.Type<typeof Remote>
 

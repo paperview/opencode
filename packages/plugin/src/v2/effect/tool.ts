@@ -297,6 +297,11 @@ export interface RegisterOptions {
   readonly namespace?: string
   /** Defaults to true. False exposes the tool directly to the provider. */
   readonly codemode?: boolean
+  /**
+   * Session that owns these tools. When set, only that session's model requests
+   * see them. Unset means every session in the location sees them.
+   */
+  readonly owner?: string
 }
 
 export interface ToolDraft {
